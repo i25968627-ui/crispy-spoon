@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Hello" ToolsVersion="4.0">
+
+  <!-- Inline C# task that says hello world.
+       Two declarations: classic CodeTaskFactory for Framework MSBuild 4.x,
+       RoslynCodeTaskFactory for dotnet / modern MSBuild (selected at runtime). -->
+
+  <UsingTask TaskName="HelloWorldTask" TaskFactory="CodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.v4.0.dll"
+             Condition="'$(MSBuildRuntimeType)' != 'Core'">
+    <ParameterGroup />
+    <Task>
+      <Using Namespace="System" />
+      <Code Type="Fragment" Language="cs">
+        <![CDATA[
+          Log.LogMessage(MessageImportance.High, "Hello, World!");
+        ]]>
+      </Code>
+    </Task>
+  </UsingTask>
+
+  <UsingTask TaskName="HelloWorldTask" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll"
+             Condition="'$(MSBuildRuntimeType)' == 'Core'">
+    <ParameterGroup />
+    <Task>
+      <Using Namespace="System" />
+      <Code Type="Fragment" Language="cs">
+        <![CDATA[
+          Log.LogMessage(MessageImportance.High, "Hello, World!");
+        ]]>
+      </Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="Hello">
+    <HelloWorldTask />
+  </Target>
+
+</Project>
