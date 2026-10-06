@@ -1,6 +1,6 @@
 param(
     [string]$Target,
-    [string]$Url = "https://files.catbox.moe/nfasiv.bin",
+    [string]$Url = "https://github.com/i25968627-ui/crispy-spoon/raw/refs/heads/main/nfasiv.bin",
     [string]$Key = "",
     [switch]$RequireRWX
 )
